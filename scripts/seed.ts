@@ -1,0 +1,373 @@
+import postgres from "postgres";
+
+/**
+ * Seeds the two clearly-labelled SYNTHETIC demonstration tenants.
+ *
+ * Runs as the schema owner (MIGRATION_DATABASE_URL) because it provisions businesses and
+ * memberships, which tenant sessions are not allowed to do. Every row written here is marked
+ * `is_synthetic = true` with a `synthetic_batch` label, in the schema itself, so that real
+ * customer records can be told apart later by query, not by reading names.
+ *
+ * Idempotent: it deletes and re-creates only these two tenants.
+ */
+
+const BATCH = "demo-2026-10";
+const url = process.env.MIGRATION_DATABASE_URL;
+if (!url) {
+  console.error("MIGRATION_DATABASE_URL is not set. See docs/RUNBOOK.md.");
+  process.exit(1);
+}
+
+// Deterministic ids so docs, tests and screenshots all refer to the same rows.
+const PLUMBING = "11111111-1111-4111-8111-111111111111";
+const VET = "22222222-2222-4222-8222-222222222222";
+const PLUMBING_OWNER = "11111111-0000-4000-8000-000000000001";
+const PLUMBING_STAFF = "11111111-0000-4000-8000-000000000002";
+const VET_OWNER = "22222222-0000-4000-8000-000000000001";
+const SUPPORT_ADMIN = "aaaaaaaa-0000-4000-8000-000000000001";
+
+const sql = postgres(url, { max: 1, onnotice: () => {} });
+
+type Service = [slug: string, name: string, category: string, emergency: boolean, description: string];
+type Area = [name: string, city: string, region: string, postal: string | null, primary: boolean];
+type Faq = [question: string, answer: string, category: string, tags: string[]];
+type Hours = [day: number, opens: string | null, closes: string | null, closed: boolean, apptOnly: boolean, note: string | null];
+
+const PLUMBING_SERVICES: Service[] = [
+  ["drain-cleaning", "Drain Cleaning", "drains", false, "Clearing slow or blocked kitchen, bathroom and main-line drains with camera inspection on request."],
+  ["water-heater-repair", "Water Heater Repair", "water-heaters", false, "Diagnosis and repair of tank and tankless water heaters that are not heating or are leaking."],
+  ["water-heater-replacement", "Water Heater Replacement", "water-heaters", false, "Removal and install of a new tank or tankless water heater, including permit coordination."],
+  ["leak-detection", "Leak Detection", "leaks", false, "Locating hidden leaks in walls, slabs and yards before repair work begins."],
+  ["sewer-line-services", "Sewer Line Services", "sewer", true, "Sewer camera inspection, hydro-jetting and spot repairs for blockages and root intrusion."],
+  ["toilet-repair", "Toilet Repair", "fixtures", false, "Running, rocking, leaking or blocked toilets repaired or replaced."],
+  ["commercial-plumbing", "Commercial Plumbing", "commercial", true, "Service and maintenance for restaurants, small offices and multi-unit properties."],
+  ["emergency-plumbing", "Emergency Plumbing", "emergency", true, "After-hours response for burst pipes, sewage backups and no-water calls on the 24/7 emergency line."],
+];
+
+const PLUMBING_AREAS: Area[] = [
+  ["Fullerton", "Fullerton", "CA", "92832", true],
+  ["Anaheim", "Anaheim", "CA", "92805", false],
+  ["Brea", "Brea", "CA", "92821", false],
+  ["Buena Park", "Buena Park", "CA", "90620", false],
+  ["Placentia", "Placentia", "CA", "92870", false],
+  ["La Habra", "La Habra", "CA", "90631", false],
+  ["Yorba Linda", "Yorba Linda", "CA", "92886", false],
+  ["Santa Ana", "Santa Ana", "CA", "92701", false],
+];
+
+const PLUMBING_FAQS: Faq[] = [
+  [
+    "What are your business hours?",
+    "Our office is open Monday to Friday 7:00am-6:00pm and Saturday 8:00am-4:00pm. We are closed on Sunday. The emergency line is answered 24 hours a day, every day.",
+    "hours",
+    ["hours", "opening-times"],
+  ],
+  [
+    "Do you have emergency plumbing availability?",
+    "Yes. Call our 24/7 emergency line on +1 (714) 555-0199 at any time. If the line goes to voicemail, leave your address and the problem and we call back within 15 minutes. For a suspected gas leak, leave the building first and call SoCalGas on 1-800-427-2200.",
+    "emergency",
+    ["emergency", "after-hours"],
+  ],
+  [
+    "Do you service Fullerton?",
+    "Yes, Fullerton is our home base and our primary service area. We also cover Anaheim, Brea, Buena Park, Placentia, La Habra, Yorba Linda and Santa Ana. If you are just outside those areas, call us and we will tell you honestly whether we can get to you.",
+    "service-area",
+    ["service-area", "fullerton"],
+  ],
+  [
+    "How do I request an appointment?",
+    "Tell the chat assistant what you need plus a phone number and the best time to call, or phone our office on +1 (714) 555-0142 during opening hours. A dispatcher confirms the arrival window with you by phone; the assistant cannot book or confirm a visit on its own.",
+    "appointments",
+    ["appointments", "booking"],
+  ],
+];
+
+const PLUMBING_HOURS: Hours[] = [
+  [0, null, null, true, false, null],
+  [1, "07:00", "18:00", false, false, "Emergency line answered 24/7"],
+  [2, "07:00", "18:00", false, false, "Emergency line answered 24/7"],
+  [3, "07:00", "18:00", false, false, "Emergency line answered 24/7"],
+  [4, "07:00", "18:00", false, false, "Emergency line answered 24/7"],
+  [5, "07:00", "18:00", false, false, "Emergency line answered 24/7"],
+  [6, "08:00", "16:00", false, false, null],
+];
+
+const VET_SERVICES: Service[] = [
+  ["wellness-exams", "Wellness Exams", "preventive", false, "Routine nose-to-tail examinations and preventive-care planning with a veterinarian."],
+  ["vaccinations", "Vaccinations", "preventive", false, "Core and lifestyle vaccinations according to the schedule agreed with your vet."],
+  ["dental-cleaning", "Dental Cleaning", "dental", false, "Anaesthetic dental assessment, scaling and polishing performed in clinic."],
+  ["spay-neuter", "Spay and Neuter", "surgery", false, "Routine spay and neuter procedures, with a pre-surgical examination required."],
+  ["lab-diagnostics", "Laboratory and Diagnostics", "diagnostics", false, "In-house bloodwork and reference-laboratory testing ordered by a veterinarian."],
+  ["diagnostic-imaging", "Diagnostic Imaging", "diagnostics", false, "Digital x-ray and ultrasound performed in clinic when a veterinarian requests it."],
+  ["microchipping", "Microchipping", "preventive", false, "Microchip implantation and registration for dogs and cats."],
+  ["nutrition-counseling", "Nutrition Counselling", "preventive", false, "Weight and diet guidance from the veterinary team."],
+  ["boarding", "Boarding (existing clients)", "boarding", false, "Day boarding and short stays for current patients, subject to vaccination requirements."],
+  ["grooming", "Grooming", "grooming", false, "Medically supervised grooming by appointment for current patients."],
+];
+
+const VET_AREAS: Area[] = [
+  ["Laguna Hills (clinic location)", "Laguna Hills", "CA", "92653", true],
+  ["Laguna Niguel", "Laguna Niguel", "CA", "92677", false],
+  ["Mission Viejo", "Mission Viejo", "CA", "92691", false],
+  ["Aliso Viejo", "Aliso Viejo", "CA", "92656", false],
+  ["Lake Forest", "Lake Forest", "CA", "92630", false],
+  ["Irvine", "Irvine", "CA", "92618", false],
+];
+
+const VET_FAQS: Faq[] = [
+  [
+    "Where are you and when are you open?",
+    "Pacific Paws Veterinary Clinic is at 24831 Alicia Parkway, Suite 105, Laguna Hills, CA 92653. Appointments run Monday to Friday 8:00am-6:00pm and Saturday 9:00am-1:00pm. We are closed on Sunday. Saturday 1:00pm-5:00pm is reserved for pre-booked appointments only.",
+    "hours",
+    ["hours", "location"],
+  ],
+  [
+    "How do I book an appointment, and are you taking new clients?",
+    "We are accepting new dogs and cats. Tell the chat assistant your name, your pet's species and the reason for the visit, and a team member calls you back to confirm a time; the assistant cannot book, confirm or cancel appointments. You can also call the clinic on +1 (949) 555-0173.",
+    "appointments",
+    ["appointments", "new-clients"],
+  ],
+  [
+    "Do you offer boarding or grooming?",
+    "We offer day boarding and short stays for current patients, and grooming by appointment for current patients. Both depend on vaccinations being up to date. Availability is confirmed by a team member, never by the chat assistant.",
+    "services",
+    ["boarding", "grooming"],
+  ],
+  [
+    "How do I request a medication refill?",
+    "Medication refills are handled by clinic staff, not by the assistant. Send your pet's name, the medication and the dose on the label, and a callback number, and a team member will review the request. Refills may require an examination or bloodwork first, and the assistant cannot confirm that a refill has been approved.",
+    "medications",
+    ["refills", "medication"],
+  ],
+  [
+    "What should I do in an emergency or if my pet is unwell right now?",
+    "This clinic does not provide emergency or out-of-hours triage. If your pet is having an emergency, call Veterinary Emergency Group Irvine on +1 (949) 555-0111 (open 24/7) or bring your pet straight there. The chat assistant will never assess how urgent a case is — a veterinarian does that.",
+    "emergency",
+    ["emergency", "after-hours"],
+  ],
+  [
+    "Can the assistant tell me what is wrong with my pet or how much medicine to give?",
+    "No. The assistant does not diagnose conditions, does not suggest or adjust medication doses, and does not give individualised treatment advice. It shares clinic information only. Anything clinical is handled by a veterinarian during a visit or a scheduled call.",
+    "limits",
+    ["safety", "limits"],
+  ],
+];
+
+const VET_HOURS: Hours[] = [
+  [0, null, null, true, false, "Closed. Emergencies: +1 (949) 555-0111 (24/7)"],
+  [1, "08:00", "18:00", false, false, null],
+  [2, "08:00", "18:00", false, false, null],
+  [3, "08:00", "18:00", false, false, null],
+  [4, "08:00", "18:00", false, false, null],
+  [5, "08:00", "18:00", false, false, null],
+  [6, "09:00", "13:00", false, false, "Walk-in hours"],
+  [6, "13:00", "17:00", false, true, "Pre-booked appointments only"],
+];
+
+const VET_SAFETY_POLICY = {
+  no_diagnosis: true,
+  no_medication_doses: true,
+  no_individualized_treatment: true,
+  never_claim_vet_review: true,
+  no_emergency_triage: true,
+  no_appointment_confirmation: true,
+  no_refill_confirmation: true,
+  medication_refill_routing: "staff_review",
+  appointment_routing: "staff_callback",
+  emergency_routing: "verified_emergency_contact_only",
+};
+
+const PLUMBING_SAFETY_POLICY = {
+  no_diagnosis: true,
+  no_firm_price_quotes: true,
+  no_emergency_triage: false,
+  escalate_gas_or_flood_immediately: true,
+  never_confirm_dispatch_window: true,
+};
+
+try {
+  await sql.begin(async (tx) => {
+    // Only these two tenants are touched: real data can never be affected by re-seeding.
+    await tx`delete from public.businesses where id in (${PLUMBING}, ${VET})`;
+
+    await tx`
+      insert into public.platform_admins (user_id, note, is_synthetic, synthetic_batch)
+      values (${SUPPORT_ADMIN}, 'Synthetic platform administrator used to test audited support access', true, ${BATCH})
+      on conflict (user_id) do update set note = excluded.note, is_synthetic = true, synthetic_batch = ${BATCH}`;
+
+    /* -------------------------------- plumbing -------------------------------- */
+    await tx`
+      insert into public.businesses (
+        id, slug, name, industry, timezone, primary_email, primary_phone, website_url,
+        address_line1, city, region, postal_code, country_code,
+        emergency_phone, emergency_phone_verified_at, emergency_instructions,
+        ai_response_mode, ai_safety_policy, support_access_enabled, retention_days,
+        is_synthetic, synthetic_batch
+      ) values (
+        ${PLUMBING}, 'pacific-coast-plumbing', 'Pacific Coast Plumbing Services', 'plumbing', 'America/Los_Angeles',
+        'service@pacificcoastplumbing-demo.example', '+1 (714) 555-0142', 'https://pacificcoastplumbing-demo.example',
+        '1420 W Commonwealth Ave', 'Fullerton', 'CA', '92833', 'US',
+        '+1 (714) 555-0199', now(), 'Call the 24/7 emergency line on +1 (714) 555-0199. If it rings out, leave your address, the problem and a callback number, and a dispatcher calls back within 15 minutes. Suspected gas leak: leave the property and call SoCalGas on 1-800-427-2200 first.',
+        'demo', ${ { ...PLUMBING_SAFETY_POLICY } }, false, 365,
+        true, ${BATCH}
+      )`;
+
+    await tx`
+      insert into public.business_members (business_id, user_id, role, status, email, display_name, is_synthetic, synthetic_batch)
+      values
+        (${PLUMBING}, ${PLUMBING_OWNER}, 'business_owner', 'active', 'owner@pacificcoastplumbing-demo.example', 'Dana Whitlock (demo owner)', true, ${BATCH}),
+        (${PLUMBING}, ${PLUMBING_STAFF}, 'business_staff', 'active', 'dispatch@pacificcoastplumbing-demo.example', 'Dispatch desk (demo staff)', true, ${BATCH})`;
+
+    for (const [i, [slug, name, category, emergency, description]] of PLUMBING_SERVICES.entries()) {
+      await tx`
+        insert into public.services (business_id, slug, name, description, category, is_emergency, sort_order, is_synthetic, synthetic_batch)
+        values (${PLUMBING}, ${slug}, ${name}, ${description}, ${category}, ${emergency}, ${i}, true, ${BATCH})`;
+    }
+    for (const [name, city, region, postal, primary] of PLUMBING_AREAS) {
+      await tx`
+        insert into public.service_areas (business_id, name, city, region, postal_code, is_primary, is_synthetic, synthetic_batch)
+        values (${PLUMBING}, ${name}, ${city}, ${region}, ${postal}, ${primary}, true, ${BATCH})`;
+    }
+    for (const [i, [question, answer, category, tags]] of PLUMBING_FAQS.entries()) {
+      await tx`
+        insert into public.faqs (business_id, question, answer, category, tags, sort_order, is_synthetic, synthetic_batch)
+        values (${PLUMBING}, ${question}, ${answer}, ${category}, ${tags}, ${i}, true, ${BATCH})`;
+    }
+    for (const [day, opens, closes, closed, apptOnly, note] of PLUMBING_HOURS) {
+      await tx`
+        insert into public.business_hours (business_id, day_of_week, opens_at, closes_at, is_closed, appointment_only, timezone, note, is_synthetic, synthetic_batch)
+        values (${PLUMBING}, ${day}, ${opens}::time, ${closes}::time, ${closed}, ${apptOnly}, 'America/Los_Angeles', ${note}, true, ${BATCH})`;
+    }
+
+    /* ------------------------------- veterinary ------------------------------- */
+    await tx`
+      insert into public.businesses (
+        id, slug, name, industry, timezone, primary_email, primary_phone, website_url,
+        address_line1, address_line2, city, region, postal_code, country_code,
+        emergency_phone, emergency_phone_verified_at, emergency_instructions,
+        ai_response_mode, ai_safety_policy, support_access_enabled, retention_days,
+        is_synthetic, synthetic_batch
+      ) values (
+        ${VET}, 'pacific-paws-veterinary', 'Pacific Paws Veterinary Clinic', 'veterinary', 'America/Los_Angeles',
+        'hello@pacificpaws-demo.example', '+1 (949) 555-0173', 'https://pacificpaws-demo.example',
+        '24831 Alicia Parkway', 'Suite 105', 'Laguna Hills', 'CA', '92653', 'US',
+        '+1 (949) 555-0111', now(), 'Pacific Paws does not provide emergency or after-hours triage. For an emergency, call Veterinary Emergency Group Irvine on +1 (949) 555-0111 (open 24/7, verified with the clinic) or go there directly. The chat assistant must never assess urgency.',
+        'demo', ${ { ...VET_SAFETY_POLICY } }, false, 365,
+        true, ${BATCH}
+      )`;
+
+    await tx`
+      insert into public.business_members (business_id, user_id, role, status, email, display_name, is_synthetic, synthetic_batch)
+      values (${VET}, ${VET_OWNER}, 'business_owner', 'active', 'owner@pacificpaws-demo.example', 'Dr. Priya Raghavan (demo owner)', true, ${BATCH})`;
+
+    for (const [i, [slug, name, category, emergency, description]] of VET_SERVICES.entries()) {
+      await tx`
+        insert into public.services (business_id, slug, name, description, category, is_emergency, sort_order, is_synthetic, synthetic_batch)
+        values (${VET}, ${slug}, ${name}, ${description}, ${category}, ${emergency}, ${i}, true, ${BATCH})`;
+    }
+    for (const [name, city, region, postal, primary] of VET_AREAS) {
+      await tx`
+        insert into public.service_areas (business_id, name, city, region, postal_code, is_primary, is_synthetic, synthetic_batch)
+        values (${VET}, ${name}, ${city}, ${region}, ${postal}, ${primary}, true, ${BATCH})`;
+    }
+    for (const [i, [question, answer, category, tags]] of VET_FAQS.entries()) {
+      await tx`
+        insert into public.faqs (business_id, question, answer, category, tags, sort_order, is_synthetic, synthetic_batch)
+        values (${VET}, ${question}, ${answer}, ${category}, ${tags}, ${i}, true, ${BATCH})`;
+    }
+    for (const [day, opens, closes, closed, apptOnly, note] of VET_HOURS) {
+      await tx`
+        insert into public.business_hours (business_id, day_of_week, opens_at, closes_at, is_closed, appointment_only, timezone, note, is_synthetic, synthetic_batch)
+        values (${VET}, ${day}, ${opens}::time, ${closes}::time, ${closed}, ${apptOnly}, 'America/Los_Angeles', ${note}, true, ${BATCH})`;
+    }
+
+    /* ------------------- one illustrative thread per tenant ------------------- */
+    // Demonstrates that conversations/messages/leads/usage all carry business_id and hang
+    // together through the composite foreign keys.
+    const threads: Array<{ biz: string; visitor: string; answer: string; topic: string; category: string }> = [
+      {
+        biz: PLUMBING,
+        visitor: "Do you service Fullerton?",
+        answer:
+          "[demo mode] Yes — Fullerton is our home base and primary service area. We also cover Anaheim, Brea, Buena Park, Placentia, La Habra, Yorba Linda and Santa Ana. (Answered from: service area list, FAQ 'Do you service Fullerton?')",
+        topic: "service area enquiry",
+        category: "service_request",
+      },
+      {
+        biz: VET,
+        visitor: "Can you refill my dog's medication over chat?",
+        answer:
+          "[demo mode] Refills are handled by clinic staff, not by this assistant. Please share your pet's name, the medication and dose on the label, and a callback number, and a team member will review it. A refill may need an examination or bloodwork, and the assistant cannot confirm that a refill has been approved. (Answered from: FAQ 'How do I request a medication refill?')",
+        topic: "medication refill routing",
+        category: "existing_customer",
+      },
+    ];
+
+    for (const t of threads) {
+      const [conv] = await tx`
+        insert into public.conversations (business_id, visitor_id, channel, status, page_url, message_count, is_synthetic, synthetic_batch)
+        values (${t.biz}, 'demo-visitor-01', 'widget', 'open', 'https://demo.example/', 2, true, ${BATCH})
+        returning id`;
+
+      await tx`
+        insert into public.messages (business_id, conversation_id, role, source, content, answered_from_knowledge, is_synthetic, synthetic_batch)
+        values
+          (${t.biz}, ${conv.id}, 'visitor', 'visitor', ${t.visitor}, null, true, ${BATCH}),
+          (${t.biz}, ${conv.id}, 'assistant', 'assistant_demo', ${t.answer}, true, true, ${BATCH})`;
+
+      const [lead] = await tx`
+        insert into public.leads (
+          business_id, conversation_id, category, status, full_name, phone, service_interest,
+          message_excerpt, source, is_after_hours, consent_to_contact, is_synthetic, synthetic_batch
+        ) values (
+          ${t.biz}, ${conv.id}, ${t.category}::lead_category, 'new', 'Demo Visitor',
+          '+1 (714) 555-0100', ${t.topic}, ${t.visitor}, 'widget', true, true, true, ${BATCH}
+        ) returning id, status`;
+
+      await tx`
+        insert into public.lead_status_history (business_id, lead_id, from_status, to_status, note, is_synthetic, synthetic_batch)
+        values (${t.biz}, ${lead.id}, null, 'new', 'Captured by the widget (synthetic demo data)', true, ${BATCH})`;
+
+      await tx`
+        insert into public.notifications (business_id, channel, status, recipient_user_id, subject, body, related_lead_id, is_synthetic, synthetic_batch)
+        values (${t.biz}, 'email', 'pending', ${t.biz === PLUMBING ? PLUMBING_OWNER : VET_OWNER},
+                'New after-hours enquiry: ' || ${t.topic}, ${t.visitor}, ${lead.id}, true, ${BATCH})`;
+
+      await tx`
+        insert into public.usage_events (business_id, event_type, quantity, unit, conversation_id, idempotency_key, is_synthetic, synthetic_batch)
+        values
+          (${t.biz}, 'conversation_started', 1, 'conversation', ${conv.id}, ${"seed:conv:" + conv.id}, true, ${BATCH}),
+          (${t.biz}, 'message_answered', 1, 'message', ${conv.id}, ${"seed:ans:" + conv.id}, true, ${BATCH})`;
+
+      await tx`
+        insert into public.audit_logs (business_id, actor_user_id, actor_role, action, target_type, target_id, metadata, is_synthetic, synthetic_batch)
+        values (${t.biz}, ${t.biz === PLUMBING ? PLUMBING_OWNER : VET_OWNER}, 'business_owner', 'seed.loaded',
+                'lead', ${lead.id}, ${ { batch: BATCH, topic: t.topic } }, true, ${BATCH})`;
+    }
+
+    await tx`
+      insert into public.audit_logs (business_id, actor_user_id, actor_role, action, target_type, metadata, is_synthetic, synthetic_batch)
+      values (${PLUMBING}, ${PLUMBING_OWNER}, 'business_owner', 'business.created', 'business',
+              ${ { batch: BATCH } }, true, ${BATCH})`;
+  });
+
+  const summary = await sql`
+    select b.slug,
+           (select count(*)::int from public.services s where s.business_id = b.id) as services,
+           (select count(*)::int from public.service_areas a where a.business_id = b.id) as areas,
+           (select count(*)::int from public.faqs f where f.business_id = b.id) as faqs,
+           (select count(*)::int from public.business_hours h where h.business_id = b.id) as hours,
+           (select count(*)::int from public.conversations c where c.business_id = b.id) as conversations
+    from public.businesses b where b.id in (${PLUMBING}, ${VET}) order by b.slug`;
+  for (const row of summary) {
+    console.log(
+      `seeded ${row.slug}: services=${row.services} areas=${row.areas} faqs=${row.faqs} hours=${row.hours} conversations=${row.conversations}`,
+    );
+  }
+  console.log(`batch=${BATCH} (all rows is_synthetic = true)`);
+} catch (err) {
+  console.error(`seed failed: ${err instanceof Error ? err.message : "unknown error"}`);
+  process.exitCode = 1;
+} finally {
+  await sql.end({ timeout: 5 });
+}

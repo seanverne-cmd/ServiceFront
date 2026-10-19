@@ -1,0 +1,24 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+
+# Local environment and secrets — never committed.
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Runtime output
+.run/
+*.log
+npm-debug.log*
+bun.lockb
+.DS_Store
+next-env.d.ts
+tsconfig.tsbuildinfo
+
+# symlinked heavy dirs (stored off the small /home volume)
+node_modules
+.next
