@@ -86,7 +86,9 @@ export async function withTenantTransaction<T>(
   const ctx = assertContext(context);
   const sql = getSql();
   try {
-    return await sql.begin(async (tx: any) => {
+    // `sql.begin` is typed generously by the driver (it cannot know T's shape across the
+    // transaction boundary), so the resolved value is narrowed back to T here.
+    return (await sql.begin(async (tx: any) => {
       await tx`select set_config('app.current_business_id', ${ctx.businessId}, true)`;
       await tx`select set_config('app.current_user_id', ${ctx.userId}, true)`;
       await tx`select set_config('app.support_access', ${ctx.supportAccess === true ? "on" : "off"}, true)`;
@@ -103,7 +105,7 @@ export async function withTenantTransaction<T>(
       }
 
       return await fn(tx);
-    });
+    })) as T;
   } catch (err) {
     if (err instanceof TenancyError || err instanceof DataAccessError || err instanceof ValidationError) throw err;
     mapDatabaseError(err, "withTenantTransaction");
