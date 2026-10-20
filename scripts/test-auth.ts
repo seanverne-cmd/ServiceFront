@@ -58,6 +58,16 @@ function check(name: string, condition: boolean, detail?: unknown): void {
   }
 }
 
+/**
+ * Removes the layout's business switcher from a rendered dashboard: the server HTML
+ * `<option>`s AND their duplicate inside the RSC flight payload. What is left is the page's own
+ * content, which must be scoped to the active tenant only.
+ */
+function stripBusinessSwitcher(body: string): string {
+  return body
+    .replace(/<option\b[^>]*>[\s\S]*?<\/option>/g, "")
+    .replace(/\\"option\\",\\"[0-9a-f-]{36}\\",\{[^}]*\}/g, "");
+}
 function section(title: string): void {
   console.log(`\n${title}`);
 }
@@ -207,7 +217,32 @@ try {
   });
   check("session cookie is HttpOnly", /httponly/i.test(sessionCookie), sessionCookie);
   check("session cookie is SameSite=Lax", /samesite=lax/i.test(sessionCookie), sessionCookie);
-  check("session cookie is not Secure in local development", !/;\s*secure/i.test(sessionCookie), sessionCookie);
+  // The Secure flag is a MODE-DEPENDENT policy, so assert the true behaviour of the mode the
+  // server reports rather than one universal claim. /api/health publishes the policy that
+  // src/lib/auth/session.ts (sessionCookieSecure) actually applied.
+  const health = await anon.get("/api/health");
+  const healthCfg = (JSON.parse(health.body || "{}") as { configuration?: Record<string, unknown> })
+    .configuration ?? {};
+  const serverSecure = healthCfg.sessionCookieSecure;
+  const serverEnv = healthCfg.nodeEnv;
+  check("health reports the server's cookie policy", typeof serverSecure === "boolean", healthCfg);
+  check(
+    "session cookie's Secure flag matches the policy the server applied",
+    /;\s*secure/i.test(sessionCookie) === (serverSecure === true),
+    { cookie: sessionCookie, policy: serverSecure, nodeEnv: serverEnv },
+  );
+  check(
+    "a production server ALWAYS marks the session cookie Secure",
+    serverEnv !== "production" || serverSecure === true,
+    { nodeEnv: serverEnv, policy: serverSecure },
+  );
+  check(
+    "local development over plain http keeps the flow working (no Secure, or a loopback host)",
+    serverEnv === "production" ||
+      !/;\s*secure/i.test(sessionCookie) ||
+      /localhost|127\.0\.0\.1|\[::1\]/.test(BASE),
+    { cookie: sessionCookie, base: BASE },
+  );
 
   const ownerDash = await owner.get("/dashboard");
   check("GET /dashboard returns the plumbing dashboard", ownerDash.status === 200 && ownerDash.body.includes(PLUMBING_NAME));
@@ -316,7 +351,20 @@ try {
     multiApi2,
   );
   const multiDash = await multi.get("/dashboard");
-  check("switched dashboard renders the vet tenant only", multiDash.body.includes(VET_NAME) && !multiDash.body.includes(PLUMBING_NAME));
+  // The dashboard layout renders a business switcher listing EVERY membership the user has, so
+  // both names legitimately appear in the page. What must be true is that the page's own content
+  // is the ACTIVE (vet) tenant and the plumbing business appears only as a switch-back option.
+  const switcher = multiDash.body.match(/<select[^>]*aria-label="Active business"[\s\S]*?<\/select>/)?.[0] ?? "";
+  check("switched dashboard renders the vet tenant's own data", multiDash.status === 200 && multiDash.body.includes(VET_NAME), {
+    status: multiDash.status,
+  });
+  check("the business switcher still offers a route back to the plumbing tenant", switcher.includes(PLUMBING_ID), switcher.slice(0, 400));
+  check("the switcher has the vet tenant selected, i.e. the switch took effect in the page", new RegExp(`<option value="${VET_ID}"[^>]*selected`).test(switcher), switcher.slice(0, 400));
+  check(
+    "outside the switcher the dashboard contains no plumbing business data",
+    !stripBusinessSwitcher(multiDash.body).includes(PLUMBING_NAME),
+    "found the other tenant's name in the page body",
+  );
   const multiEdit = await multi.post("/api/dashboard/profile", profileForm(await readProfile(VET_ID), { city: "Not Allowed" }));
   check("staff role at the switched business is refused for profile edits (403)", multiEdit.status === 403, multiEdit.status);
 
@@ -324,7 +372,17 @@ try {
   section("6. Expired session and session forced onto a foreign business");
   const staffToken = staff.token();
   if (!staffToken) throw new Error("staff session token missing");
-  await sql`update public.sessions set expires_at = now() - interval '1 minute' where token_hash = ${sha256(staffToken)}`;
+  // Age the session row instead of only moving expires_at backwards: the sessions table has
+  // `check (expires_at > created_at)`, and a lone single-row UPDATE trips it, so the tampering
+  // never happened and every section-6 check after it was silently skipped. Move both stamps
+  // together into the past so the constraint holds and the row really is expired.
+  const aged = await sql`
+    update public.sessions
+       set created_at = now() - interval '13 hours',
+           expires_at = now() - interval '1 minute'
+     where token_hash = ${sha256(staffToken)}
+    returning expires_at < now() as is_expired`;
+  check("the staff session row was really expired (tampering applied)", aged[0]?.is_expired === true, aged[0]);
   const expiredDash = await staff.get("/dashboard");
   check("an expired session is refused and redirected to sign-in", isRedirectTo(expiredDash, "/sign-in"), expiredDash.status);
   const expiredApi = await staff.get("/api/dashboard/profile");

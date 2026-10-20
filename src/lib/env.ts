@@ -31,6 +31,11 @@ const schema = z.object({
   /** Public origin of the site hosting the embeddable widget (used for CORS + link building). */
   PUBLIC_WIDGET_ORIGIN: z.string().default("http://localhost:3100"),
   DEMO_MODE: boolFromString(true),
+  /**
+   * Force the session cookie's `Secure` flag ON outside production (e.g. an https dev tunnel).
+   * One-way only: this can never turn `Secure` off, because production always sets it.
+   */
+  SF_COOKIE_SECURE: boolFromString(false),
   LLM_PROVIDER: z.string().optional(),
   LLM_API_KEY: z.string().optional(),
   LLM_MODEL: z.string().optional(),

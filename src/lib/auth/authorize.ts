@@ -70,6 +70,15 @@ export async function requireSession(): Promise<SessionContext> {
 export async function requireBusinessAccess(session?: SessionContext): Promise<Authorized> {
   const s = session ?? (await getSession());
   if (!s) throw new AuthorizationError("unauthenticated", "Please sign in.");
+  // A session whose active business is not one of the user's memberships is refused
+  // explicitly. It is never repaired into a different business - see
+  // resolveActiveBusiness() in ./session.
+  if (s.activeBusinessInvalid) {
+    throw new AuthorizationError(
+      "not_a_member",
+      "This session points at a business you are not a member of.",
+    );
+  }
   if (!s.activeBusinessId || !s.activeBusiness) {
     throw new AuthorizationError("no_business", "This account is not a member of any business.");
   }

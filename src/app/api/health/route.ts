@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getHealthSnapshot } from "@/lib/db";
 import { env, llmConfigured } from "@/lib/env";
+import { sessionCookieSecure } from "@/lib/auth/session";
 import { logger, errorMessage } from "@/lib/logger";
 import { healthQuerySchema } from "@/lib/validation";
 
@@ -31,6 +32,10 @@ export async function GET(request: Request) {
     llmConfigured: llmConfigured(),
     // Names only. Never the key itself, and never the connection string.
     llmProvider: env().DEMO_MODE ? null : (env().LLM_PROVIDER ?? null),
+    // Lets test:auth assert the real cookie policy of the mode it is talking to, instead of
+    // assuming one. A boolean, never a secret.
+    nodeEnv: env().NODE_ENV,
+    sessionCookieSecure: sessionCookieSecure(),
   };
 
   try {

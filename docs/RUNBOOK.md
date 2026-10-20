@@ -53,6 +53,100 @@ Check space before and during a build with `df -h /home`. If `/home` is nearly f
 something you can name and re-create (`.next`, `node_modules`, build output) rather than letting an
 install die half-finished.
 
+## One-command rebuild after a machine replacement
+
+This machine is replaced between sessions. PostgreSQL is gone and `/opt/sf-store` is wiped, so
+the app will not build until both are restored. One idempotent command does it:
+
+```bash
+cd /home/team/shared/servicefront
+bash scripts/dev-env.sh
+```
+
+It performs, and re-runs safely at any time:
+
+1. recreates `/opt/sf-store/node_modules` and `/opt/sf-store/next` (the symlink targets),
+2. re-links `node_modules` / `.next` if the links themselves are missing or wrong,
+3. starts PostgreSQL 16 if it is installed but not running (and tells you how to install it if not),
+4. runs `bun install` with the Bun cache and `TMPDIR` kept off the small `/home` volume,
+5. reports whether `.env` and the database are reachable, then prints the exact next steps.
+
+After it, the usual sequence applies:
+
+```bash
+bash scripts/bootstrap-db.sh     # only if the cluster was wiped: roles + dev database
+bun run db:migrate
+bun run db:seed                  # tenants + the four demo accounts
+bun run build
+setsid nohup bunx next start -p 3200 > /tmp/sf3200.log 2>&1 &
+TEST_BASE_URL=http://127.0.0.1:3200 bun run test:isolation
+TEST_BASE_URL=http://127.0.0.1:3200 bun run test:auth
+```
+
+`bun run db:seed:accounts` alone is enough to restore the demo logins on a machine whose database
+survived but whose users were re-seeded.
+
+## Demo accounts (synthetic)
+
+All four are fictional demonstration identities with published passwords. They exist to exercise
+roles and business switching; they must never be reused for a real business.
+
+| Email | Password | Role | Business |
+| --- | --- | --- | --- |
+| `owner@pacificcoastplumbing-demo.example` | `Plumbing!Demo2026` | `business_owner` | Pacific Coast Plumbing Services |
+| `staff@pacificcoastplumbing-demo.example` | `Staff!Demo2026` | `business_staff` | Pacific Coast Plumbing Services |
+| `owner@pacificpaws-demo.example` | `Paws!Demo2026` | `business_owner` | Pacific Paws Veterinary Clinic |
+| `multi@servicefront-demo.example` | `Multi!Demo2026` | owner at plumbing, staff at paws | both (business switching) |
+
+`bun run db:seed:accounts` upserts these users and their `business_members` rows and re-derives the
+password hashes, so it is also the password reset. It needs `MIGRATION_DATABASE_URL` (owner role),
+because it writes `users` and `business_members`, which tenant sessions may not do.
+
+## Running the authentication suite
+
+`test:auth` talks to a **running** server over HTTP (it never calls the data layer for the checks
+themselves), so build and start the app first:
+
+```bash
+bun run build
+setsid nohup bunx next start -p 3200 > /tmp/sf3200.log 2>&1 &
+sleep 5
+TEST_BASE_URL=http://127.0.0.1:3200 bun run test:auth     # expect: "50 passed, 0 failed"
+```
+
+Port **3000 is the public marketing site — never start the app there.** 3100 is the default in
+`package.json`; 3200 is what the CI-style runs use.
+
+What it proves: unauthenticated requests redirect to sign-in; sign-in sets an `httpOnly`,
+`SameSite=Lax` cookie whose `Secure` flag matches the mode the server is running in (see below);
+no account enumeration; every tenant sees only its own data; a staff write is refused server-side
+with 403 and nothing reaches the database; a member of both businesses can switch and the rendered
+dashboard follows the switch; and an expired session or a session pointing at a business the user
+is not a member of is refused (401/403), never silently served.
+
+### The session cookie's `Secure` policy
+
+`sessionCookieSecure()` in `src/lib/auth/session.ts` is the single source of truth, and
+`/api/health` reports it (`configuration.sessionCookieSecure`, `configuration.nodeEnv`):
+
+- **production** (`next start`) — the cookie is **always** `Secure`. `SF_COOKIE_SECURE` cannot turn
+  it off.
+- **development / test** — not `Secure` by default, so the plain-http flow works on any host;
+  set `SF_COOKIE_SECURE=true` to opt in (e.g. an https dev tunnel). Browsers accept `Secure`
+  cookies on `http://localhost`/`127.0.0.1` anyway, but not on a plain-http LAN address.
+
+`test:auth` reads the policy from `/api/health` and asserts the cookie matches it, instead of
+hard-coding one expectation: it fails if a production server ever omits `Secure`, and it fails if
+the cookie and the declared policy disagree.
+
+## Moving to hosted Supabase Auth
+
+The SQL never creates roles and every page reads identity through one module, so adopting hosted
+Supabase Auth is a single-file change: **`src/lib/auth/session.ts`** — its header comment
+(`HOSTED-AUTH MIGRATION POINT`) lists exactly what to replace (cookie helpers, `getSession`,
+`signIn`/`signOut`). `src/lib/auth/authorize.ts`, the tenancy context, every RLS policy and every
+page stay as they are, because `business_members.user_id` already holds the provider's user id.
+
 ## Clean-machine bootstrap
 
 Assumes a Debian/Ubuntu host with root or passwordless sudo. No paid third-party service is needed.

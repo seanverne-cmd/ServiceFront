@@ -6,9 +6,10 @@ business's *approved* facts, and the owner reviews conversations in a dashboard.
 one-time setup fee plus a monthly subscription.
 
 **Status: Phase 1 (foundation) is complete and verified.** The database schema, migrations,
-multi-tenant model with row-level security, demo seed data, the isolation test suite and the app
-build all pass on a clean machine. The chat widget itself (Phase 2) is not built yet — see
-"What is not built yet" below.
+multi-tenant model with row-level security, demo seed data, the isolation test suite (33
+assertions), the authentication suite (`test:auth`, 50 assertions) and the app build all pass on a
+clean machine. The chat widget itself (Phase 2) is not built yet — see "What is not built yet"
+below.
 
 ## Stack
 
@@ -65,6 +66,34 @@ that `scripts/bootstrap-db.sh` creates. `.env` is git-ignored and must never be 
 
 Full clean-machine and disaster-recovery instructions: [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 Schema and tenancy model: [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md).
+
+## Demo accounts (synthetic)
+
+`bun run db:seed:accounts` creates (or re-hashes) exactly these four accounts. All of them are
+**fictional demonstration identities** with published passwords — they are only fit for local and
+demo use, and they must never be reused for a real business.
+
+| Account (email) | Password | Role | Business |
+| --- | --- | --- | --- |
+| `owner@pacificcoastplumbing-demo.example` | `Plumbing!Demo2026` | `business_owner` | Pacific Coast Plumbing Services |
+| `staff@pacificcoastplumbing-demo.example` | `Staff!Demo2026` | `business_staff` | Pacific Coast Plumbing Services |
+| `owner@pacificpaws-demo.example` | `Paws!Demo2026` | `business_owner` | Pacific Paws Veterinary Clinic |
+| `multi@servicefront-demo.example` | `Multi!Demo2026` | `business_owner` (plumbing) + `business_staff` (paws) | both — used to prove business switching |
+
+`bun run db:seed:accounts` is idempotent: it upserts the four `users` rows and their
+`business_members` rows and re-derives the password hashes, so it doubles as a password reset on a
+machine that came back from a replacement. It requires `MIGRATION_DATABASE_URL` (see `.env`).
+
+`bun run test:auth` drives the running app over HTTP with these accounts and asserts sign-in,
+cookie flags, session expiry, role enforcement and tenant isolation (50 assertions). See
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md#running-the-authentication-suite).
+
+## Moving to hosted Supabase Auth
+
+One file changes: **`src/lib/auth/session.ts`** (the `HOSTED-AUTH MIGRATION POINT` comment at the
+top lists exactly what to replace). `business_members.user_id` already stores the identity
+provider's user id, so `src/lib/auth/authorize.ts`, the tenancy context, every RLS policy and every
+page are untouched.
 
 ## Repository layout
 

@@ -25,7 +25,8 @@ import { clearFailures, hashKey, isRateLimited, recordFailure } from "./rate-lim
  * `sessions` table on the server. Nothing a browser sends (not a query string, not a form
  * field, not a header) can name the user or the active business.
  *
- * Cookie flags: httpOnly, SameSite=Lax, Secure in production, Path=/, explicit expiry.
+ * Cookie flags: httpOnly, SameSite=Lax, Path=/, explicit expiry, and Secure in production
+ * (in development it is Secure only when SF_COOKIE_SECURE=true). See sessionCookieSecure().
  * The database stores only sha256(token), so a database read cannot be replayed as a login.
  *
  * HOSTED-AUTH MIGRATION POINT (the one place that changes)
@@ -58,8 +59,39 @@ export type SessionContext = {
   user: SessionUser;
   activeBusinessId: string | null;
   activeBusiness: ActiveBusiness | null;
+  /**
+   * True when the PERSISTED active_business_id names a business the user is not (or is no longer)
+   * a member of. Such a session is refused outright - see resolveActiveBusiness().
+   */
+  activeBusinessInvalid: boolean;
   businesses: SessionBusiness[];
 };
+
+/**
+ * Resolves the active business from a session row, FAIL-CLOSED.
+ *
+ * Only two cases are legitimate:
+ *   - active_business_id is NULL          -> the user's first membership (fresh session)
+ *   - active_business_id is a membership  -> that business
+ *
+ * An active_business_id that names no membership (a stale row, a revoked membership, or a session
+ * row crafted in the database) must NOT be silently repaired into some other business: that would
+ * answer the request as if nothing were wrong. It yields activeBusiness = null plus
+ * activeBusinessInvalid = true, and requireBusinessAccess() turns that into a 403.
+ */
+function resolveActiveBusiness(
+  businesses: SessionBusiness[],
+  claimedBusinessId: string | null,
+): { active: SessionBusiness | null; invalid: boolean } {
+  if (!claimedBusinessId) return { active: businesses[0] ?? null, invalid: false };
+  const member = businesses.find((b) => b.business_id === claimedBusinessId) ?? null;
+  if (member) return { active: member, invalid: false };
+  logger.warn("session claims a business the user is not a member of; refusing the session", {
+    claimed: claimedBusinessId.slice(0, 8),
+  });
+  return { active: null, invalid: true };
+}
+
 
 export function createSessionToken(): string {
   return randomBytes(32).toString("base64url");
@@ -69,11 +101,23 @@ export function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+/**
+ * The session cookie's `Secure` policy — the single source of truth, also reported by
+ * /api/health so test:auth can assert the real behaviour of the mode it is talking to.
+ *
+ *   production            -> always Secure (non-negotiable; SF_COOKIE_SECURE cannot turn it off)
+ *   development/test      -> not Secure by default, so the plain-http local flow works
+ *                            (browsers also accept Secure cookies on http://localhost, but not
+ *                            on a plain-http LAN host); SF_COOKIE_SECURE=true opts in.
+ */
+export function sessionCookieSecure(): boolean {
+  return env().NODE_ENV === "production" || env().SF_COOKIE_SECURE;
+}
 function cookiesOptions(expiresAt: Date) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: env().NODE_ENV === "production",
+    secure: sessionCookieSecure(),
     path: "/",
     expires: expiresAt,
   };
@@ -102,8 +146,7 @@ export const getSession = cache(async (): Promise<SessionContext | null> => {
   if (!record) return null;
 
   const businesses = Array.isArray(record.businesses) ? record.businesses : [];
-  const active =
-    businesses.find((b) => b.business_id === record.active_business_id) ?? businesses[0] ?? null;
+  const { active, invalid } = resolveActiveBusiness(businesses, record.active_business_id);
 
   return {
     sessionId: record.session_id,
@@ -113,6 +156,7 @@ export const getSession = cache(async (): Promise<SessionContext | null> => {
     activeBusiness: active
       ? { id: active.business_id, name: active.name, slug: active.slug, role: active.role }
       : null,
+    activeBusinessInvalid: invalid,
     businesses,
   };
 });
@@ -173,8 +217,7 @@ export async function signIn(
   if (!session) throw new Error("session_created_but_unreadable");
 
   const businesses = session.businesses ?? [];
-  const active =
-    businesses.find((b) => b.business_id === session.active_business_id) ?? businesses[0] ?? null;
+  const { active, invalid } = resolveActiveBusiness(businesses, session.active_business_id);
 
   if (active) {
     await recordAuthAudit(
@@ -199,6 +242,7 @@ export async function signIn(
       activeBusiness: active
         ? { id: active.business_id, name: active.name, slug: active.slug, role: active.role }
         : null,
+      activeBusinessInvalid: invalid,
       businesses,
     },
   };
