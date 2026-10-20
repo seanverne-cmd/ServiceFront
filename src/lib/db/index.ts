@@ -3,6 +3,25 @@ import { withTenant, type TenantContext, mapDatabaseError, TenancyError } from "
 import { ValidationError, visitorMessageSchema } from "@/lib/validation";
 import { logger } from "@/lib/logger";
 
+// Authentication / profile data access. Re-exported here so every caller still imports only
+// from "@/lib/db" and never touches the driver or the pool directly.
+export {
+  findCredentialByEmail,
+  createSession,
+  loadSessionByTokenHash,
+  revokeSession,
+  switchSessionBusiness,
+  touchSession,
+  getMembershipRole,
+  recordAuthAudit,
+} from "./auth";
+export {
+  getBusinessProfileDetail,
+  updateBusinessProfile,
+  type BusinessProfileDetail,
+  type BusinessProfileUpdate,
+} from "./profile";
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**

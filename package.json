@@ -9,9 +9,11 @@
     "start": "next start -p 3100",
     "typecheck": "tsc --noEmit",
     "db:migrate": "bun run scripts/migrate.ts",
-    "db:seed": "bun run scripts/seed.ts",
+    "db:seed": "bun run scripts/seed.ts && bun run scripts/seed-accounts.ts",
+    "db:seed:accounts": "bun run scripts/seed-accounts.ts",
     "db:reset": "bun run scripts/reset.ts",
     "test:isolation": "bun run scripts/test-isolation.ts",
+    "test:auth": "bun run scripts/test-auth.ts",
     "verify": "bun run db:migrate && bun run db:seed && bun run test:isolation"
   },
   "dependencies": {
