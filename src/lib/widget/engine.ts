@@ -73,8 +73,25 @@ function tokens(text: string): string[] {
     .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
 }
 
+/**
+ * Phrase match on WHOLE WORDS.
+ *
+ * This used to be `text.includes(pattern)`, which is a substring test: "come to" matched inside
+ * "someone come tomorrow", so "My water heater stopped working. Can someone come tomorrow?"
+ * was routed to service_area and answered with a coverage refusal. Every pattern here is a
+ * phrase in English, so it must match as a phrase: bounded on the left by the start of the
+ * string or a non-word character, and on the right by the end or a non-word character.
+ * A non-alphabetic pattern ("$") keeps the plain substring test, because "boundary + $" +
+ * "boundary" would fail on "$500".
+ */
 function matches(text: string, patterns: Array<string | RegExp>): boolean {
-  return patterns.some((p) => (typeof p === "string" ? text.includes(p) : p.test(text)));
+  return patterns.some((p) => {
+    if (typeof p !== "string") return p.test(text);
+    const phrase = p.trim().toLowerCase();
+    if (!/[a-z]/.test(phrase)) return text.includes(phrase);
+    const escaped = phrase.replace(/[-/\\^$*+?.()|[\]{}]/g, (c) => "\\" + c);
+    return new RegExp(`(?:^|[^a-z0-9])${escaped}(?![a-z0-9])`).test(text);
+  });
 }
 
 /** Money the visitor might be fishing for. Used only to prove we never produce a figure. */
