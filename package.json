@@ -14,6 +14,7 @@
     "db:reset": "bun run scripts/reset.ts",
     "test:isolation": "bun run scripts/test-isolation.ts",
     "test:auth": "bun run scripts/test-auth.ts",
+    "test:chat": "bun run scripts/test-chat.ts",
     "verify": "bun run db:migrate && bun run db:seed && bun run test:isolation"
   },
   "dependencies": {
