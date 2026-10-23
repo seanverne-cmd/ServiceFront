@@ -361,17 +361,47 @@ function composeContact(kb: KnowledgeBase): ComposedAnswer {
   return { intent: "contact", reply, sources, grounded: true, confidence: 0.9, factRefs: sources.map((s) => `${s.type}:${s.id}`) };
 }
 
-function composeAppointment(kb: KnowledgeBase): ComposedAnswer {
+/**
+ * Appointment intent. A visitor asking for a visit almost always names the job ("can someone
+ * come tomorrow about my water heater"), so the reply must first confirm whether that job is
+ * one of the business's approved services — from the stored service rows only — and only then
+ * hand off. It never states or implies a slot, a time or availability: the business confirms
+ * that, not this assistant.
+ */
+function composeAppointment(kb: KnowledgeBase, text: string): ComposedAnswer {
+  const service = pickService(kb, text);
   const faq = faqFor(kb, "appointments");
-  const sources: AnswerSource[] = faq ? [faqSource(faq)] : [];
-  const body = faq
-    ? faq.answer
-    : `I cannot book or confirm an appointment. ${contactLine(kb)} and a team member will arrange it.`;
-  const reply = [
-    body,
-    "To be clear: nothing has been booked and no visit is confirmed by this chat. Leave a phone number and the best time to call and the team will follow up.",
-  ].join(" ");
-  return { intent: "appointment", reply, sources, grounded: Boolean(faq), confidence: 0.8, factRefs: sources.map((s) => `faq:${s.id}`) };
+  const sources: AnswerSource[] = [];
+  const lines: string[] = [];
+
+  if (service) {
+    sources.push(serviceSource(service));
+    lines.push(`Yes — ${service.name} is on ${kb.business.name}'s approved list of services.`);
+    if (service.description) lines.push(service.description);
+  }
+
+  if (faq) {
+    sources.push(faqSource(faq));
+    lines.push(faq.answer);
+  } else {
+    lines.push(`I cannot book or confirm an appointment myself.`);
+  }
+
+  lines.push(
+    "To be clear about what this chat can and cannot do: nothing has been booked, no slot or arrival time is reserved, and I cannot confirm when someone could attend. Only the team can confirm availability.",
+  );
+  lines.push(
+    `To get it moving, ${contactLine(kb)} and a team member will arrange it. If you would rather be called back, leave your name, a callback number, the service address and the best time to reach you.`,
+  );
+
+  return {
+    intent: "appointment",
+    reply: lines.join(" "),
+    sources,
+    grounded: Boolean(service ?? faq),
+    confidence: service ? 0.85 : 0.8,
+    factRefs: sources.map((s) => `${s.type}:${s.id}`),
+  };
 }
 
 function composeService(kb: KnowledgeBase, service: ServiceRow): ComposedAnswer {
@@ -456,7 +486,7 @@ export function answerQuestion(kb: KnowledgeBase, message: string, now: Date = n
 
   if (matches(text, HOURS_ASK)) return composeHours(kb, text, now);
 
-  if (matches(text, APPOINTMENT_ASK)) return composeAppointment(kb);
+  if (matches(text, APPOINTMENT_ASK)) return composeAppointment(kb, text);
 
   if (matches(text, CONTACT_ASK)) return composeContact(kb);
 
