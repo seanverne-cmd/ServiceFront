@@ -226,6 +226,7 @@ export type ExchangeInput = {
   answeredFromKnowledge: boolean;
   factRefs: string[];
   confidence: number;
+  intent: string;
   modelProvider: string | null;
   modelName: string | null;
   latencyMs: number | null;
@@ -239,13 +240,14 @@ export async function appendExchange(tx: any, input: ExchangeInput): Promise<voi
   await tx`
     insert into public.messages
       (business_id, conversation_id, role, source, content, content_sha256,
-       answered_from_knowledge, cited_fact_refs, confidence, model_provider, model_name, latency_ms,
+       answered_from_knowledge, cited_fact_refs, confidence, intent,
+       model_provider, model_name, latency_ms,
        is_synthetic, synthetic_batch)
     values
       (${input.businessId}, ${input.conversationId}, 'visitor', 'visitor', ${input.visitorText}, ${sha256(input.visitorText)},
-       null, '[]'::jsonb, null, null, null, null, ${input.isSynthetic}, ${input.syntheticBatch}),
+       null, '[]'::jsonb, null, null, null, null, null, ${input.isSynthetic}, ${input.syntheticBatch}),
       (${input.businessId}, ${input.conversationId}, 'assistant', ${assistantSource}::message_source, ${input.replyText}, ${sha256(input.replyText)},
-       ${input.answeredFromKnowledge}, ${JSON.stringify(input.factRefs)}::jsonb, ${input.confidence},
+       ${input.answeredFromKnowledge}, ${JSON.stringify(input.factRefs)}::jsonb, ${input.confidence}, ${input.intent},
        ${input.mode === "live" ? input.modelProvider : null},
        ${input.mode === "live" ? input.modelName : null},
        ${input.latencyMs}, ${input.isSynthetic}, ${input.syntheticBatch})`;
@@ -263,11 +265,17 @@ export async function appendExchange(tx: any, input: ExchangeInput): Promise<voi
 
 export type ConversationListItem = {
   id: string;
+  visitorId: string | null;
+  status: string;
   startedAt: string;
   lastMessageAt: string | null;
   messageCount: number;
   preview: string;
+  intent: string | null;
+  outcome: string;
+  modeLabel: string;
   hasLiveAnswer: boolean;
+  isSynthetic: boolean;
 };
 
 export type StoredMessage = {
@@ -276,6 +284,10 @@ export type StoredMessage = {
   source: string;
   content: string;
   answeredFromKnowledge: boolean | null;
+  intent: string | null;
+  factRefs: string[];
+  confidence: number | null;
+  modelName: string | null;
   createdAt: string;
   modeLabel: string;
 };
@@ -293,31 +305,59 @@ export function modeLabel(source: string): string {
   }
 }
 
+/**
+ * What happened in the conversation, in the owner's terms. Derived from the LAST assistant
+ * message rather than stored separately, so it can never drift from the transcript.
+ */
+function outcomeLabel(answeredFromKnowledge: boolean | null, hasAssistant: boolean, status: string): string {
+  if (!hasAssistant) return status === "open" ? "No reply yet" : `No reply (${status})`;
+  const answer = answeredFromKnowledge
+    ? "Answered from approved facts"
+    : "No confirmed answer — visitor referred on";
+  return status === "open" ? answer : `${answer} · conversation ${status}`;
+}
+
 export async function listConversations(context: TenantContext, limit = 50): Promise<ConversationListItem[]> {
   return withTenant(context, async (tx) => {
     const rows = await tx`
-      select c.id, c.started_at, c.last_message_at, c.message_count,
+      select c.id, c.visitor_id, c.status::text as status, c.started_at, c.last_message_at,
+             c.message_count, c.is_synthetic,
              coalesce(
                (select m.content from public.messages m
                  where m.conversation_id = c.id and m.role = 'visitor'
                  order by m.created_at limit 1),
                ''
              ) as preview,
-             exists (
-               select 1 from public.messages m2
-                where m2.conversation_id = c.id and m2.source = 'assistant_live'
-             ) as has_live
+             (select m2.source::text from public.messages m2
+               where m2.conversation_id = c.id and m2.role = 'assistant'
+               order by m2.created_at desc, m2.id desc limit 1) as last_source,
+             (select m3.intent from public.messages m3
+               where m3.conversation_id = c.id and m3.role = 'assistant'
+               order by m3.created_at desc, m3.id desc limit 1) as last_intent,
+             (select m4.answered_from_knowledge from public.messages m4
+               where m4.conversation_id = c.id and m4.role = 'assistant'
+               order by m4.created_at desc, m4.id desc limit 1) as last_grounded
       from public.conversations c
       where c.business_id = ${context.businessId}
       order by coalesce(c.last_message_at, c.started_at) desc
       limit ${limit}`;
     return rows.map((r: any) => ({
       id: r.id,
+      visitorId: r.visitor_id ?? null,
+      status: String(r.status),
       startedAt: r.started_at.toISOString?.() ?? String(r.started_at),
       lastMessageAt: r.last_message_at ? (r.last_message_at.toISOString?.() ?? String(r.last_message_at)) : null,
       messageCount: Number(r.message_count),
       preview: String(r.preview).slice(0, 140),
-      hasLiveAnswer: Boolean(r.has_live),
+      intent: r.last_intent ?? null,
+      outcome: outcomeLabel(
+        r.last_grounded === null || r.last_grounded === undefined ? null : Boolean(r.last_grounded),
+        Boolean(r.last_source),
+        String(r.status),
+      ),
+      modeLabel: r.last_source ? modeLabel(String(r.last_source)) : "No assistant reply yet",
+      hasLiveAnswer: r.last_source === "assistant_live",
+      isSynthetic: Boolean(r.is_synthetic),
     }));
   });
 }
@@ -325,26 +365,46 @@ export async function listConversations(context: TenantContext, limit = 50): Pro
 export async function getConversation(
   context: TenantContext,
   conversationId: string,
-): Promise<{ id: string; startedAt: string; messages: StoredMessage[] } | null> {
+): Promise<{
+  id: string;
+  status: string;
+  visitorId: string | null;
+  startedAt: string;
+  lastMessageAt: string | null;
+  isSynthetic: boolean;
+  messages: StoredMessage[];
+} | null> {
   return withTenant(context, async (tx) => {
     const [conv] = await tx`
-      select id, started_at from public.conversations
+      select id, status::text as status, visitor_id, started_at, last_message_at, is_synthetic
+        from public.conversations
        where id = ${conversationId} and business_id = ${context.businessId}`;
     if (!conv) return null;
     const rows = await tx`
-      select id, role::text as role, source::text as source, content, answered_from_knowledge, created_at
+      select id, role::text as role, source::text as source, content, answered_from_knowledge,
+             intent, cited_fact_refs, confidence, model_name, created_at
       from public.messages
       where conversation_id = ${conversationId} and business_id = ${context.businessId}
       order by created_at, id`;
     return {
       id: conv.id,
+      status: String(conv.status),
+      visitorId: conv.visitor_id ?? null,
       startedAt: conv.started_at.toISOString?.() ?? String(conv.started_at),
+      lastMessageAt: conv.last_message_at
+        ? (conv.last_message_at.toISOString?.() ?? String(conv.last_message_at))
+        : null,
+      isSynthetic: Boolean(conv.is_synthetic),
       messages: rows.map((m: any) => ({
         id: m.id,
         role: m.role,
         source: m.source,
         content: m.content,
         answeredFromKnowledge: m.answered_from_knowledge,
+        intent: m.intent ?? null,
+        factRefs: Array.isArray(m.cited_fact_refs) ? m.cited_fact_refs.map((f: unknown) => String(f)) : [],
+        confidence: m.confidence === null || m.confidence === undefined ? null : Number(m.confidence),
+        modelName: m.model_name ?? null,
         createdAt: m.created_at.toISOString?.() ?? String(m.created_at),
         modeLabel: modeLabel(m.source),
       })),
