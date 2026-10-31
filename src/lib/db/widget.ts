@@ -234,6 +234,20 @@ export type ExchangeInput = {
   syntheticBatch: string | null;
 };
 
+/**
+ * Cited knowledge sources come back from jsonb in three shapes: a string[], a JSON string of one
+ * (older rows), or a double-encoded JSON string. Anything else is "no citations". Reading through
+ * this is what keeps a transcript honest: an answer that cited a service record must show it.
+ */
+export function normalizeFactRefs(value: unknown): string[] {
+  let v: unknown = value;
+  for (let i = 0; i < 4 && typeof v === "string"; i += 1) {
+    try { v = JSON.parse(v); } catch { return []; }
+  }
+  if (!Array.isArray(v)) return [];
+  return v.map((f) => String(f)).filter(Boolean);
+}
+
 /** Store the visitor message and the assistant reply as one atomic exchange. */
 export async function appendExchange(tx: any, input: ExchangeInput): Promise<void> {
   const assistantSource = input.mode === "live" ? "assistant_live" : "assistant_demo";
@@ -247,7 +261,7 @@ export async function appendExchange(tx: any, input: ExchangeInput): Promise<voi
       (${input.businessId}, ${input.conversationId}, 'visitor', 'visitor', ${input.visitorText}, ${sha256(input.visitorText)},
        null, '[]'::jsonb, null, null, null, null, null, ${input.isSynthetic}, ${input.syntheticBatch}),
       (${input.businessId}, ${input.conversationId}, 'assistant', ${assistantSource}::message_source, ${input.replyText}, ${sha256(input.replyText)},
-       ${input.answeredFromKnowledge}, ${JSON.stringify(input.factRefs)}::jsonb, ${input.confidence}, ${input.intent},
+       ${input.answeredFromKnowledge}, ${JSON.stringify(normalizeFactRefs(input.factRefs))}::jsonb, ${input.confidence}, ${input.intent},
        ${input.mode === "live" ? input.modelProvider : null},
        ${input.mode === "live" ? input.modelName : null},
        ${input.latencyMs}, ${input.isSynthetic}, ${input.syntheticBatch})`;
@@ -402,7 +416,7 @@ export async function getConversation(
         content: m.content,
         answeredFromKnowledge: m.answered_from_knowledge,
         intent: m.intent ?? null,
-        factRefs: Array.isArray(m.cited_fact_refs) ? m.cited_fact_refs.map((f: unknown) => String(f)) : [],
+        factRefs: normalizeFactRefs(m.cited_fact_refs),
         confidence: m.confidence === null || m.confidence === undefined ? null : Number(m.confidence),
         modelName: m.model_name ?? null,
         createdAt: m.created_at.toISOString?.() ?? String(m.created_at),

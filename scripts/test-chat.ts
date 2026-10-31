@@ -164,21 +164,41 @@ class Session {
     }
   }
 
-  async signIn(email: string, password: string): Promise<void> {
+  /**
+   * Sign in exactly as the browser form does: a form-encoded POST to the SAME origin (BASE) that
+   * every later GET uses. The previous version posted JSON, which the endpoint does not accept, so
+   * no session cookie was ever captured and every dashboard read came back as a signed-out 307.
+   * It also returns the outcome, so a caller can assert the session was really established instead
+   * of silently testing the signed-out path.
+   */
+  async signIn(email: string, password: string) {
     const res = await fetch(`${BASE}/api/auth/sign-in`, {
       method: "POST",
       redirect: "manual",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: BASE,
+      },
+      body: new URLSearchParams({ email, password }).toString(),
     });
     this.capture(res);
+    return {
+      status: res.status,
+      location: res.headers.get("location"),
+      cookieSet: this.sessionCookie() !== null,
+    };
+  }
+
+  /** The session cookie value, or null — lets a test prove the jar is non-empty. */
+  sessionCookie(): string | null {
+    return this.cookies.get("sf_session") ?? null;
   }
 
   async get(path: string): Promise<{ status: number; location: string | null; body: string }> {
     const cookie = this.header();
     const res = await fetch(`${BASE}${path}`, {
       redirect: "manual",
-      headers: cookie ? { cookie } : {},
+      headers: { origin: BASE, ...(cookie ? { cookie } : {}) },
     });
     const body = res.status === 200 ? await res.text() : "";
     return { status: res.status, location: res.headers.get("location"), body };
@@ -618,7 +638,17 @@ async function main() {
     );
 
     const ownerSession = new Session();
-    await ownerSession.signIn("owner@pacificcoastplumbing-demo.example", "Plumbing!Demo2026");
+    const ownerSignIn = await ownerSession.signIn(
+      "owner@pacificcoastplumbing-demo.example",
+      "Plumbing!Demo2026",
+    );
+    // The 9 red assertions this suite once had were all caused here: a sign-in that never set a
+    // cookie, so every "authenticated" read was really an anonymous request. Assert the session.
+    check(
+      "l4a sign-in through the cookie jar establishes a session (form-encoded, same origin)",
+      ownerSignIn.cookieSet && ownerSignIn.status >= 300 && ownerSignIn.status < 400,
+      ownerSignIn,
+    );
     const list = await ownerSession.get("/dashboard/conversations");
     check("l4 the plumbing owner can open the conversations list", list.status === 200, `status=${list.status}`);
     check(
@@ -669,7 +699,12 @@ async function main() {
 
     // The reverse direction: the veterinary owner opening the plumbing thread.
     const vetSession = new Session();
-    await vetSession.signIn("owner@pacificpaws-demo.example", "Paws!Demo2026");
+    const vetSignIn = await vetSession.signIn("owner@pacificpaws-demo.example", "Paws!Demo2026");
+    check(
+      "l12a the veterinary owner's own session is established",
+      vetSignIn.cookieSet,
+      vetSignIn,
+    );
     if (detailId) {
       const reverse = await vetSession.get(`/dashboard/conversations/${detailId}`);
       check(
@@ -683,6 +718,61 @@ async function main() {
         `bytes=${reverse.body.length}`,
       );
     }
+  }
+
+  /* ------------------------------------------------------------------ (m) */
+  section("(m) a malformed sign-in body is a clean 400, never a 500");
+  {
+    // The endpoint speaks form-encoding. A JSON body used to throw out of request.formData() as an
+    // unhandled 500; a caller error must never look like a server fault.
+    const json = await fetch(`${BASE}/api/auth/sign-in`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email: "owner@pacificcoastplumbing-demo.example", password: "Plumbing!Demo2026" }),
+    });
+    const jsonBody = await json.text();
+    check("m1 a JSON body gets 400", json.status === 400, `status=${json.status} body=${jsonBody.slice(0, 160)}`);
+    check(
+      "m2 the 400 message is safe and tells the caller what to send",
+      /invalid_request/.test(jsonBody) && /form-urlencoded/i.test(jsonBody) && !/owner@|Plumbing!Demo/i.test(jsonBody),
+      jsonBody.slice(0, 200),
+    );
+    check(
+      "m3 a refused body never sets a session cookie",
+      !(json.headers.getSetCookie?.() ?? []).some((c) => c.startsWith("sf_session=") && !c.startsWith("sf_session=;")),
+      json.headers.getSetCookie?.() ?? [],
+    );
+
+    const multipart = await fetch(`${BASE}/api/auth/sign-in`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "multipart/form-data; boundary=xyz", origin: BASE },
+      body: "--xyz\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nowner@pacificpaws-demo.example\r\n--xyz--\r\n",
+    });
+    check("m4 a multipart body gets 400, not a 500", multipart.status === 400, `status=${multipart.status}`);
+
+    // A valid form-encoded POST with the fields missing is a weak credential, not a malformed
+    // request: it keeps the generic non-enumerating redirect and still must not 500.
+    const emptyForm = await fetch(`${BASE}/api/auth/sign-in`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: BASE },
+      body: "email=&password=",
+    });
+    check(
+      "m5 an empty form-encoded body still redirects generically (no 500, no enumeration)",
+      emptyForm.status === 303 && /error=invalid/.test(emptyForm.headers.get("location") ?? ""),
+      `status=${emptyForm.status} location=${emptyForm.headers.get("location")}`,
+    );
+
+    const crossOrigin = await fetch(`${BASE}/api/auth/sign-in`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example" },
+      body: "email=a&password=b",
+    });
+    check("m6 a cross-origin sign-in is still refused with 403", crossOrigin.status === 403, `status=${crossOrigin.status}`);
   }
 
   /* ---------------------------------------------------------------- summary */
