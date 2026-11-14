@@ -56,14 +56,18 @@ install die half-finished.
 ## One-command rebuild after a machine replacement
 
 This machine is replaced between sessions. PostgreSQL is gone and `/opt/sf-store` is wiped, so
-the app will not build until both are restored. One idempotent command does it:
+the app will not build until both are restored. That is two commands — the package install, then
+the repo's own repair script:
 
 ```bash
+apt-get update && apt-get install -y postgresql postgresql-contrib   # only if psql is missing
+pg_ctlcluster 16 main start
+
 cd /home/team/shared/servicefront
 bash scripts/dev-env.sh
 ```
 
-It performs, and re-runs safely at any time:
+`scripts/dev-env.sh` is idempotent and re-runs safely at any time. It performs:
 
 1. recreates `/opt/sf-store/node_modules` and `/opt/sf-store/next` (the symlink targets),
 2. re-links `node_modules` / `.next` if the links themselves are missing or wrong,
@@ -75,13 +79,18 @@ After it, the usual sequence applies:
 
 ```bash
 bash scripts/bootstrap-db.sh     # only if the cluster was wiped: roles + dev database
-bun run db:migrate
-bun run db:seed                  # tenants + the four demo accounts
+bun run db:migrate               # 10 migrations, 17 tables
+bun run db:seed                  # two tenants, knowledge base, four demo accounts
 bun run build
-setsid nohup bunx next start -p 3200 > /tmp/sf3200.log 2>&1 &
-TEST_BASE_URL=http://127.0.0.1:3200 bun run test:isolation
-TEST_BASE_URL=http://127.0.0.1:3200 bun run test:auth
+setsid nohup bun run start > /tmp/sf.log 2>&1 &   # port 3100
+sleep 5
+bun run test:isolation           # 33 assertions
+bun run test:auth                # 50 assertions, HTTP
+bun run test:chat                # 102 assertions, HTTP
 ```
+
+The suites default to `http://127.0.0.1:3100`; set `TEST_BASE_URL` / `CHAT_TEST_BASE_URL` if the
+server runs on another port (3200 is what earlier CI-style runs used).
 
 `bun run db:seed:accounts` alone is enough to restore the demo logins on a machine whose database
 survived but whose users were re-seeded.
@@ -109,13 +118,13 @@ themselves), so build and start the app first:
 
 ```bash
 bun run build
-setsid nohup bunx next start -p 3200 > /tmp/sf3200.log 2>&1 &
+setsid nohup bun run start > /tmp/sf.log 2>&1 &   # port 3100
 sleep 5
-TEST_BASE_URL=http://127.0.0.1:3200 bun run test:auth     # expect: "50 passed, 0 failed"
+bun run test:auth                                  # expect: "50 passed, 0 failed"
 ```
 
 Port **3000 is the public marketing site — never start the app there.** 3100 is the default in
-`package.json`; 3200 is what the CI-style runs use.
+`package.json`; set `TEST_BASE_URL` if you start it elsewhere.
 
 What it proves: unauthenticated requests redirect to sign-in; sign-in sets an `httpOnly`,
 `SameSite=Lax` cookie whose `Secure` flag matches the mode the server is running in (see below);
@@ -138,6 +147,51 @@ is not a member of is refused (401/403), never silently served.
 `test:auth` reads the policy from `/api/health` and asserts the cookie matches it, instead of
 hard-coding one expectation: it fails if a production server ever omits `Secure`, and it fails if
 the cookie and the declared policy disagree.
+
+## Running the chat suite
+
+`test:chat` also drives a **running** server over HTTP and needs the seeded knowledge base, so run
+`db:seed` first:
+
+```bash
+bun run test:chat            # expect: "RESULT: 102 passed, 0 failed"
+```
+
+It covers, in order: widget bootstrap and CORS, answer routing and grounding (hours, service areas,
+services, FAQs, emergency wording), honest "not confirmed" answers for questions no approved fact
+covers, appointment replies that name the approved service without implying a booked slot,
+per-visitor and per-conversation rate limits, cross-tenant refusals, persistence of every exchange,
+a foreign `conversationId` in the body being ignored, loopback origins (`localhost` and `127.0.0.1`
+on 3100/3200), the owner reading the transcript in `/dashboard/conversations/<id>` with its cited
+knowledge sources and demo label, the other tenant getting a 404 that reveals nothing, and a
+malformed sign-in body returning 400 rather than 500.
+
+If a transcript assertion about citations fails on a database that was migrated from an older
+schema, the stored `cited_fact_refs` may be double-encoded; `normalizeFactRefs()` in
+`src/lib/db/widget.ts` reads through that shape. A fresh `db:migrate` + `db:seed` always stores the
+canonical `text[]`.
+
+### Verifying the widget by hand
+
+```bash
+# the demo widget ids
+psql "postgresql://servicefront_owner:servicefront_owner@127.0.0.1:5432/servicefront_dev" \
+  -c "select slug, widget_public_id from public.businesses order by slug;"
+
+# bootstrap (200 with an allowed Origin, 403 with any other)
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Origin: http://localhost:3100' \
+  http://127.0.0.1:3100/api/widget/<widgetPublicId>/config
+
+# ask a question (expect mode:"demo" and a reply naming an approved service)
+curl -s -X POST -H 'Origin: http://localhost:3100' -H 'content-type: application/json' \
+  -d '{"text":"Do you service Fullerton?"}' \
+  http://127.0.0.1:3100/api/widget/<widgetPublicId>/message
+```
+
+Sign in as the plumbing owner at `/sign-in` and open `/dashboard/conversations` to read the stored
+exchange. A `403` means the `Origin` is not in that business's `widget_allowed_origins` or
+`PUBLIC_WIDGET_ORIGIN`; a `404` means the id is not a `sfw_...` public id (the legacy
+`widget_public_key` column is not accepted).
 
 ## Moving to hosted Supabase Auth
 
@@ -192,8 +246,8 @@ cp .env.example .env      # if .env is missing; defaults already match the local
 
 ```bash
 bun install
-bun run db:migrate        # applies db/migrations/*.sql in order, each in its own transaction
-bun run db:seed           # synthetic demo data for both fictional tenants
+bun run db:migrate        # applies db/migrations/*.sql in order, each in its own transaction (10 files, 17 tables)
+bun run db:seed           # synthetic demo data for both fictional tenants + the four demo accounts
 bun run test:isolation    # 33 assertions; must end "33 passed, 0 failed"
 ```
 
@@ -268,7 +322,10 @@ Synthetic rows are always tagged, so this never touches real customer data.
 | Symptom | Cause and fix |
 | --- | --- |
 | `bun install` dies with `ENOSPC` | `/home` is full. See "Dependencies live outside `/home`" above; free `.next`/`node_modules`, keep caches in `/var/cache/bun`. |
+| `bun install`/`next build` fails with `ENOENT` on `node_modules` or `.next` | The symlinks exist but their `/opt/sf-store` targets do not (machine replaced). Run `bash scripts/dev-env.sh`. |
 | `pg_isready: command not found` | Postgres is not installed on this machine. Step 1 above. |
+| `test:chat` gets 403 from the widget endpoints | The `Origin` header is not in the business's `widget_allowed_origins` / `PUBLIC_WIDGET_ORIGIN`. |
+| `test:chat` gets 404 from the widget endpoints | The id is not a `sfw_...` `widget_public_id` (the legacy `widget_public_key` is not accepted). |
 | `permission denied for schema public` | The `alter schema public owner` / `usage` grant is missing. Re-run `scripts/bootstrap-db.sh`. |
 | Migrations fail with `must be owner of table` | You are connecting with `servicefront_app`. Migrations must use `MIGRATION_DATABASE_URL` (`servicefront_owner`). |
 | Every query returns 0 rows | No tenant context was set, or the user has no membership. This is the intended fail-closed behaviour — check `withTenantTransaction` usage. |

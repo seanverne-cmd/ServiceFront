@@ -338,18 +338,22 @@ try {
   await owner`update public.business_members set status = 'active' where business_id = ${A} and user_id = ${USER_A}`;
 
   /* --------------------------------------------- 6. the one context-free read is narrow */
+  // Migration 0009 replaced the legacy md5 `widget_public_key` with the `sfw_...` public id; the
+  // resolver only ever accepts the public id, so the test must read the same column the widget uses.
   const widgetKeys = await owner`
-    select id, widget_public_key from public.businesses where id in (${A}, ${B}) order by id`;
-  const keyA = widgetKeys[0].widget_public_key as string;
+    select id, widget_public_id from public.businesses where id in (${A}, ${B}) order by id`;
+  const keyA = widgetKeys[0].widget_public_id as string;
   const resolved = await app.unsafe(`select app.resolve_widget_business($1) as b`, [keyA]);
   const resolvedB = resolved[0].b as Record<string, unknown> | null;
-  const missing = await app.unsafe(`select app.resolve_widget_business($1) as b`, ["0".repeat(32)]);
-  check("widget lookup by public key resolves the right business", resolvedB?.business_id === A, JSON.stringify(resolvedB));
+  const missing = await app.unsafe(`select app.resolve_widget_business($1) as b`, ["sfw_000000000000000000000000"]);
+  check("widget lookup by public id resolves the right business", resolvedB?.business_id === A, JSON.stringify(resolvedB));
   check("widget lookup with an unknown key returns nothing", (missing[0].b as unknown) === null);
   check(
     "widget lookup exposes no contact/PII fields (no email, no roster, no keys)",
     resolvedB !== null &&
-      !["primary_email", "primary_phone", "widget_public_key"].some((k) => Object.keys(resolvedB).includes(k)),
+      !["primary_email", "primary_phone", "widget_public_key", "widget_public_id"].some((k) =>
+        Object.keys(resolvedB).includes(k),
+      ),
     JSON.stringify(Object.keys(resolvedB ?? {})),
   );
 

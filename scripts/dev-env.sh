@@ -107,6 +107,7 @@ cat <<NEXT
    3. Prove it end to end, against a running server:
         bun run test:isolation
         TEST_BASE_URL=http://127.0.0.1:3100 bun run test:auth
+        CHAT_TEST_BASE_URL=http://127.0.0.1:3100 bun run test:chat
 
    Demo accounts and the full recovery procedure: docs/RUNBOOK.md
    Database is ${DB_READY} ready right now.
